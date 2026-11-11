@@ -17,6 +17,7 @@ mod workers;
 use anyhow::{bail, ensure, Result};
 use clap::Parser;
 use protocol::{Kernel, MiningJob, PoolJob, Profile};
+use state::{DEFAULT_HISTORY_WINDOW_HOURS, MAX_HISTORY_WINDOW_HOURS};
 use std::path::PathBuf;
 use zk_pow::api::proof::IncompleteBlockHeader;
 
@@ -86,6 +87,9 @@ struct Cli {
     /// JSONL event log (default: logs/bpm-<time>.jsonl in the working directory)
     #[arg(long)]
     log: Option<PathBuf>,
+    /// In-memory temperature/hashrate trend retention in hours (default 36, max 168)
+    #[arg(long, default_value_t = DEFAULT_HISTORY_WINDOW_HOURS, value_name = "HOURS")]
+    history_window_hours: u32,
     /// Optional read-only HTTP stats bind (disabled by default; no authentication)
     #[arg(long, value_name = "IP:PORT")]
     web_listen: Option<String>,
@@ -159,6 +163,7 @@ fn main() -> Result<()> {
     let Some(wallet) = cli.wallet else { bail!("--wallet is required") };
     ensure!((1.0..=1000.0).contains(&cli.priority_slowdown), "--priority-slowdown must be 1..1000 percent");
     ensure!(cli.hit_capacity >= 1 && (1..=1024).contains(&cli.queue_size) && (1..=16).contains(&cli.max_inflight), "invalid --hit-capacity, --queue-size or --max-inflight");
+    ensure!((1..=MAX_HISTORY_WINDOW_HOURS).contains(&cli.history_window_hours), "--history-window-hours must be 1..={MAX_HISTORY_WINDOW_HOURS}");
     let log_path = cli.log.unwrap_or_else(|| PathBuf::from(format!("logs/bpm-{}.jsonl", stamp())));
     let code = miner::run(miner::MineArgs {
         pool,
@@ -176,6 +181,7 @@ fn main() -> Result<()> {
         web_listen: cli.web_listen,
         web_allow_net: cli.web_allow_net,
         restore_power_limit_script: cli.restore_power_limit_script,
+        history_window_hours: cli.history_window_hours,
         priority: cli.priority,
         background: cli.background,
         priority_resume_delay: cli.priority_resume_delay,

@@ -72,7 +72,8 @@ binary, so `target/release/bpm` is the only file needed at run time.
 | `--max-temp C` | Stop at this GPU temperature (default 85 °C) |
 | `--log PATH` | JSONL event log (default `logs/bpm-<time>.jsonl`) |
 | `--restore-power-limit-script PATH` | On graceful exit, run this trusted helper with `300` as its only argument; the miner itself never changes power limits |
-| `--web-listen IP:PORT` | Optional read-only HTTP dashboard and `/api/v1/stats` JSON endpoint; disabled by default |
+| `--web-listen IP:PORT` | Optional read-only HTTP dashboard and stats/history JSON endpoints; disabled by default |
+| `--history-window-hours N` | In-memory GPU temperature/hashrate history, default 36 hours (1.5 days), range 1–168 |
 | `--json` | Print events as JSON lines |
 | `--priority PATH` | Yield the GPU to a program, see below |
 | `--background` | Yield the GPU to every other program that computes on it |
@@ -99,10 +100,14 @@ page uses port 52693 to match the previous portal. Example for these host LANs:
 
 Only list trusted local subnets, and keep the host firewall enabled; do not expose the page to a
 public network. The dashboard includes a bounded tail of formatted miner events and GPU
-core temperature/power-limit readings. Temperature comes from the miner's existing 5-second
-safety-guard sample; the web page adds no GPU polling thread. Event tailing reads at most 128 KiB
-from the existing JSONL log when a stats request arrives, omits the startup row, and returns only
-a small allowlist of formatted event types.
+temperature/power-limit readings. Temperature reuses the miner's existing 5-second safety-guard
+sample; no extra GPU polling is added. The power tile is the configured limit, not actual draw; no
+additional NVML power-usage query is made. Temperature samples and existing 30-second hashrate stats
+are retained in bounded RAM rings and streamed initially/incrementally to the chart; the default
+36-hour window uses about 1 MiB of ring storage. No history is written to disk, so it starts fresh
+when the miner restarts. Event tailing reads at most 128 KiB from the existing JSONL log when a
+stats request arrives, omits the startup row, and returns only a small allowlist of formatted event
+types.
 
 ### Kernel profiles
 

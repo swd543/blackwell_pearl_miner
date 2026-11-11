@@ -31,6 +31,7 @@ body{min-height:100dvh;display:flex;flex-direction:column}
 .tile .v small{font-size:.68rem;color:#8a93a5;font-weight:400}.tile.hot .v{color:#ffb36b}.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:.76rem;color:#8a93a5;margin-top:12px;border-top:1px solid #262b36;padding-top:10px}
 .kv b{color:#c6cbd4;font-weight:500;overflow-wrap:anywhere}pre{color:#9aa2ad;font-size:.72rem;line-height:1.6;white-space:pre-wrap;font-family:ui-monospace,monospace;margin:12px 0 0;flex:1;min-height:90px;overflow-y:auto;padding-right:4px}
 .hint{color:#6f7683;font-size:.7rem;margin:10px 0 0}
+.chart{margin-top:14px;background:#14171d;border:1px solid #262b36;border-radius:12px;padding:10px}.chart-head{display:flex;justify-content:space-between;color:#a7aebb;font-size:.78rem}.chart canvas{display:block;width:100%;height:230px}.legend{display:flex;flex-wrap:wrap;gap:12px;color:#8a93a5;font-size:.7rem}.legend span:before{content:"";display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;background:var(--c)}
 </style></head><body><div class="card">
 <div class="top"><h1>axiom <span class="sub">Pearl / Kryptex</span></h1><span id="badge" class="badge">CONNECTING</span></div>
 <p id="reason" class="reason">Waiting for miner stats…</p>
@@ -44,19 +45,24 @@ body{min-height:100dvh;display:flex;flex-direction:column}
 <div class="tile"><div class="k">Power limit</div><div class="v" id="power-limit">—</div></div>
 </div>
 <div class="kv"><span>Job</span><b id="job">—</b><span>Updated</span><b id="updated">—</b></div>
+<div class="chart"><div class="chart-head"><span>GPU temperature &amp; hashrate</span><span id="trend-window">36h</span></div><canvas id="trend" aria-label="GPU temperature and hashrate trend"></canvas><div class="legend"><span style="--c:#ffb36b">GPU °C</span><span style="--c:#6aa9ff">Compute TMAC/s</span><span style="--c:#57d98a">Submitted TH/s</span></div></div>
 <div class="sub" style="margin-top:12px">Recent miner events</div>
 <pre id="detail">Loading recent events…</pre>
 <p class="hint">Read-only · Pearl / Kryptex · no credentials are displayed</p>
 </div><script>
 const el=id=>document.getElementById(id), fmt=n=>Number.isFinite(Number(n))?Number(n).toLocaleString():"—";
 function duration(s){s=Math.max(0,Math.floor(Number(s)||0));let h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?`${h}h ${m}m`:`${m}m ${s%60}s`}
+const trend={cursor:null,temperature:[],hashrate:[],windowSeconds:129600,lastTrim:0};
+function drawTrend(){const canvas=el('trend'),rect=canvas.getBoundingClientRect(),dpr=window.devicePixelRatio||1,w=Math.max(320,rect.width),h=230;if(!rect.width)return;canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);const c=canvas.getContext('2d');c.setTransform(dpr,0,0,dpr,0,0);c.clearRect(0,0,w,h);const m={l:42,r:46,t:12,b:25},pw=w-m.l-m.r,ph=h-m.t-m.b,now=Date.now(),start=now-trend.windowSeconds*1000,tmin=40,tmax=100;let peakRate=0;for(const p of trend.hashrate)peakRate=Math.max(peakRate,p[1],p[2]);const rmax=Math.max(50,Math.ceil(peakRate*1.1/50)*50);c.font='10px system-ui';c.lineWidth=1;c.strokeStyle='#303743';c.fillStyle='#858e9d';c.textBaseline='middle';for(let i=0;i<=4;i++){let y=m.t+ph*i/4,temp=Math.round(tmax-(tmax-tmin)*i/4),rate=Math.round(rmax*(1-i/4));c.beginPath();c.moveTo(m.l,y);c.lineTo(m.l+pw,y);c.stroke();c.textAlign='right';c.fillText(`${temp}°`,m.l-6,y);c.textAlign='left';c.fillText(`${rate}`,m.l+pw+6,y)}c.textBaseline='alphabetic';c.textAlign='center';for(let i=0;i<=2;i++){let x=m.l+pw*i/2;c.fillText(new Date(start+trend.windowSeconds*1000*i/2).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),x,h-5)}
+const line=(points,value,lo,hi,color)=>{c.save();c.beginPath();c.rect(m.l,m.t,pw,ph);c.clip();c.beginPath();let began=false;for(const p of points){if(p[0]<start||p[0]>now)continue;let x=m.l+(p[0]-start)/(trend.windowSeconds*1000)*pw,y=m.t+(hi-p[value])/(hi-lo)*ph;if(!began){c.moveTo(x,y);began=true}else c.lineTo(x,y)}c.strokeStyle=color;c.lineWidth=1.6;c.stroke();c.restore()};line(trend.temperature,1,tmin,tmax,'#ffb36b');line(trend.hashrate,1,0,rmax,'#6aa9ff');line(trend.hashrate,2,0,rmax,'#57d98a');if(!trend.temperature.length&&!trend.hashrate.length){c.fillStyle='#858e9d';c.textAlign='center';c.fillText('Collecting samples…',m.l+pw/2,m.t+ph/2)}}
+async function updateTrend(){try{const url='/api/v1/history'+(trend.cursor===null?'':`?after=${trend.cursor}`),r=await fetch(url,{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);const d=await r.json();if(d.reset){trend.temperature=[];trend.hashrate=[]}trend.temperature.push(...d.temperature);trend.hashrate.push(...d.hashrate);trend.cursor=d.cursor;trend.windowSeconds=d.window_seconds;const now=Date.now();if(now-trend.lastTrim>30000){const cutoff=now-trend.windowSeconds*1000;let ti=0,hi=0;while(ti<trend.temperature.length&&trend.temperature[ti][0]<cutoff)ti++;while(hi<trend.hashrate.length&&trend.hashrate[hi][0]<cutoff)hi++;if(ti)trend.temperature.splice(0,ti);if(hi)trend.hashrate.splice(0,hi);trend.lastTrim=now}el('trend-window').textContent=`${(trend.windowSeconds/3600).toFixed(1)}h`;drawTrend()}catch(e){}}
 async function update(){try{const r=await fetch('/api/v1/stats',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);const s=await r.json();const b=el('badge');
 const mode={mining:['MINING','up','Mining'],yielding:['YIELDING','','Yielding GPU to other work'],connecting:['WAITING','','Connecting to pool'],stopping:['STOPPING','bad','Miner is stopping']};const v=mode[s.status]||['UNKNOWN','bad','Miner status unavailable'];b.textContent=v[0];b.className='badge '+v[1];el('reason').textContent=v[2];
 el('rate').textContent=fmt(s.rate?.submitted_TH_s_30m);el('accepted').textContent=fmt(s.accepted);el('rejected').textContent=fmt(s.rejected);el('stale').textContent=fmt(s.stale);el('uptime').textContent=duration(s.uptime_seconds);el('job').textContent=s.job_id||'—';el('updated').textContent=new Date().toLocaleTimeString();
 const temp=s.gpu?.temperature_c;el('temperature').textContent=temp==null?'—':`${fmt(temp)} °C`;el('temperature').closest('.tile').classList.toggle('hot',Number(temp)>=85);const limit=s.gpu?.power_limit_w;el('power-limit').textContent=limit==null?'—':`${fmt(limit)} W`;
 el('detail').textContent=(s.events||[]).join('\n')||'No recent miner events.';
 }catch(e){el('badge').textContent='OFFLINE';el('badge').className='badge bad';el('reason').textContent='Stats unavailable: '+e;}}
-update();setInterval(update,5000);
+async function refresh(){await update();await updateTrend()}refresh();setInterval(refresh,5000);window.addEventListener('resize',drawTrend);
 </script></body></html>"##;
 
 #[derive(Clone, Copy, Debug)]
@@ -191,6 +197,13 @@ fn recent_events(path: &Path) -> Vec<String> {
     tail.into_iter().collect()
 }
 
+fn trend_payload(state: &State, after: Option<u64>) -> Value {
+    let snapshot = state.trend_snapshot(after);
+    let temperature: Vec<(u64, u32)> = snapshot.temperature.iter().map(|p| (p.timestamp_ms, p.temperature_c)).collect();
+    let hashrate: Vec<(u64, f32, f32)> = snapshot.hashrate.iter().map(|p| (p.timestamp_ms, p.compute_tmac_s, p.submitted_th_s)).collect();
+    json!({"reset":snapshot.reset,"cursor":snapshot.cursor,"window_seconds":snapshot.window_seconds,"temperature":temperature,"hashrate":hashrate})
+}
+
 fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &str) {
     let header = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
@@ -212,7 +225,10 @@ fn serve(mut stream: TcpStream, state: &State, started: Instant, log_path: &Path
     let request = String::from_utf8_lossy(&buf[..n]);
     let mut parts = request.lines().next().unwrap_or_default().split_whitespace();
     let method = parts.next().unwrap_or_default();
-    let path = parts.next().unwrap_or_default().split('?').next().unwrap_or_default();
+    let target = parts.next().unwrap_or_default();
+    let mut target_parts = target.splitn(2, '?');
+    let path = target_parts.next().unwrap_or_default();
+    let query = target_parts.next();
     if method != "GET" {
         respond(&mut stream, "405 Method Not Allowed", "text/plain", "GET only\n");
         return;
@@ -221,6 +237,15 @@ fn serve(mut stream: TcpStream, state: &State, started: Instant, log_path: &Path
         "/" => respond(&mut stream, "200 OK", "text/html", DASHBOARD),
         "/api/v1/stats" | "/health" => {
             let body = stats(state, started, log_path).to_string();
+            respond(&mut stream, "200 OK", "application/json", &body);
+        }
+        "/api/v1/history" => {
+            let after = query.and_then(|q| q.split('&').find_map(|part| part.strip_prefix("after=")));
+            let after = match after.map(str::parse::<u64>).transpose() {
+                Ok(value) => value,
+                Err(_) => { respond(&mut stream, "400 Bad Request", "text/plain", "invalid after cursor\n"); return; }
+            };
+            let body = trend_payload(state, after).to_string();
             respond(&mut stream, "200 OK", "application/json", &body);
         }
         _ => respond(&mut stream, "404 Not Found", "text/plain", "not found\n"),
@@ -245,7 +270,7 @@ mod tests {
 
     #[test]
     fn endpoint_is_read_only_and_reports_stats() {
-        let state = State::new();
+        let state = State::with_history_window_hours(crate::state::DEFAULT_HISTORY_WINDOW_HOURS);
         let start = Instant::now();
         state.counters.lock().unwrap().accepted = 7;
         state.ready.store(true, Ordering::SeqCst);
@@ -274,8 +299,26 @@ mod tests {
     }
 
     #[test]
+    fn history_endpoint_returns_initial_series_then_only_new_samples() {
+        let state = State::with_history_window_hours(1);
+        state.update_gpu_telemetry(80, 250.0);
+        state.record_hashrate(300.0, 275.0);
+        let initial = trend_payload(&state, None);
+        assert_eq!(initial["reset"], true);
+        assert_eq!(initial["window_seconds"], 3600);
+        assert_eq!(initial["temperature"].as_array().unwrap().len(), 1);
+        assert_eq!(initial["hashrate"].as_array().unwrap().len(), 1);
+        let cursor = initial["cursor"].as_u64().unwrap();
+        assert_eq!(trend_payload(&state, Some(cursor))["temperature"].as_array().unwrap().len(), 0);
+        state.update_gpu_telemetry(81, 250.0);
+        let delta = trend_payload(&state, Some(cursor));
+        assert_eq!(delta["reset"], false);
+        assert_eq!(delta["temperature"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
     fn loopback_http_endpoint_serves_dashboard_and_json_stats() {
-        let state = State::new();
+        let state = State::with_history_window_hours(crate::state::DEFAULT_HISTORY_WINDOW_HOURS);
         state.ready.store(true, Ordering::SeqCst);
         state.counters.lock().unwrap().accepted = 3;
         let server = WebServer::start("127.0.0.1:0", state.clone(), Instant::now(), &[], PathBuf::from("/dev/null")).unwrap();

@@ -11,6 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+pub const DEFAULT_HISTORY_WINDOW_HOURS: u32 = 36;
+pub const MAX_HISTORY_WINDOW_HOURS: u32 = 168;
+
 #[derive(Clone, Debug)]
 pub struct Generation {
     pub number: u64,
@@ -67,6 +70,87 @@ pub struct GpuTelemetry {
     pub power_limit_w: Option<f64>,
 }
 
+#[derive(Clone, Copy)]
+pub struct TemperaturePoint {
+    pub sequence: u64,
+    pub timestamp_ms: u64,
+    pub temperature_c: u32,
+}
+
+#[derive(Clone, Copy)]
+pub struct HashratePoint {
+    pub sequence: u64,
+    pub timestamp_ms: u64,
+    pub compute_tmac_s: f32,
+    pub submitted_th_s: f32,
+}
+
+pub struct TrendSnapshot {
+    pub reset: bool,
+    pub cursor: u64,
+    pub window_seconds: u64,
+    pub temperature: Vec<TemperaturePoint>,
+    pub hashrate: Vec<HashratePoint>,
+}
+
+struct TrendHistory {
+    window_seconds: u64,
+    next_sequence: u64,
+    temperature: VecDeque<TemperaturePoint>,
+    hashrate: VecDeque<HashratePoint>,
+}
+
+impl TrendHistory {
+    fn new(window_seconds: u64) -> Self {
+        Self { window_seconds: window_seconds.max(1), next_sequence: 0, temperature: VecDeque::new(), hashrate: VecDeque::new() }
+    }
+
+    fn sequence(&mut self) -> u64 {
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.next_sequence
+    }
+
+    fn record_temperature(&mut self, timestamp_ms: u64, temperature_c: u32) {
+        let sequence = self.sequence();
+        self.temperature.push_back(TemperaturePoint { sequence, timestamp_ms, temperature_c });
+        self.prune(timestamp_ms);
+    }
+
+    fn record_hashrate(&mut self, timestamp_ms: u64, compute_tmac_s: f64, submitted_th_s: f64) {
+        if !compute_tmac_s.is_finite() || !submitted_th_s.is_finite() || compute_tmac_s < 0.0 || submitted_th_s < 0.0 {
+            return;
+        }
+        let sequence = self.sequence();
+        self.hashrate.push_back(HashratePoint { sequence, timestamp_ms, compute_tmac_s: compute_tmac_s as f32, submitted_th_s: submitted_th_s as f32 });
+        self.prune(timestamp_ms);
+    }
+
+    fn prune(&mut self, now_ms: u64) {
+        let cutoff = now_ms.saturating_sub(self.window_seconds.saturating_mul(1000));
+        while self.temperature.front().is_some_and(|p| p.timestamp_ms < cutoff) { self.temperature.pop_front(); }
+        while self.hashrate.front().is_some_and(|p| p.timestamp_ms < cutoff) { self.hashrate.pop_front(); }
+    }
+
+    fn snapshot(&mut self, after: Option<u64>, now_ms: u64) -> TrendSnapshot {
+        self.prune(now_ms);
+        let oldest = self.temperature.front().map(|p| p.sequence).into_iter()
+            .chain(self.hashrate.front().map(|p| p.sequence)).min();
+        let reset = match after {
+            None => true,
+            Some(cursor) if cursor > self.next_sequence => true,
+            Some(cursor) => oldest.map(|first| cursor.saturating_add(1) < first).unwrap_or(cursor < self.next_sequence),
+        };
+        let cursor = if reset { 0 } else { after.unwrap_or(0) };
+        TrendSnapshot {
+            reset,
+            cursor: self.next_sequence,
+            window_seconds: self.window_seconds,
+            temperature: self.temperature.iter().copied().filter(|p| p.sequence > cursor).collect(),
+            hashrate: self.hashrate.iter().copied().filter(|p| p.sequence > cursor).collect(),
+        }
+    }
+}
+
 pub struct State {
     latest: Mutex<Option<Generation>>,
     pub ready: AtomicBool,
@@ -78,11 +162,12 @@ pub struct State {
     pub compression: Mutex<Option<String>>,
     pub share_rate: Mutex<ShareRate>,
     pub gpu_telemetry: Mutex<GpuTelemetry>,
+    trend_history: Mutex<TrendHistory>,
     submit_previous: bool,
 }
 
 impl State {
-    pub fn new() -> Arc<Self> {
+    pub fn with_history_window_hours(hours: u32) -> Arc<Self> {
         Arc::new(State {
             latest: Mutex::new(None),
             ready: AtomicBool::new(false),
@@ -94,6 +179,7 @@ impl State {
             compression: Mutex::new(None),
             share_rate: Mutex::new(ShareRate::new()),
             gpu_telemetry: Mutex::new(GpuTelemetry::default()),
+            trend_history: Mutex::new(TrendHistory::new(u64::from(hours.max(1)) * 3600)),
             submit_previous: std::env::var("PEARL_SUBMIT_PREVIOUS_JOB").map(|v| v != "0").unwrap_or(true),
         })
     }
@@ -127,6 +213,13 @@ impl State {
     }
     pub fn update_gpu_telemetry(&self, temperature_c: u32, power_limit_w: f64) {
         *self.gpu_telemetry.lock().unwrap() = GpuTelemetry { temperature_c: Some(temperature_c), power_limit_w: Some(power_limit_w) };
+        self.trend_history.lock().unwrap().record_temperature(now_unix_ms(), temperature_c);
+    }
+    pub fn record_hashrate(&self, compute_tmac_s: f64, submitted_th_s: f64) {
+        self.trend_history.lock().unwrap().record_hashrate(now_unix_ms(), compute_tmac_s, submitted_th_s);
+    }
+    pub fn trend_snapshot(&self, after: Option<u64>) -> TrendSnapshot {
+        self.trend_history.lock().unwrap().snapshot(after, now_unix_ms())
     }
     pub fn gpu_telemetry(&self) -> GpuTelemetry {
         *self.gpu_telemetry.lock().unwrap()
@@ -156,6 +249,10 @@ impl State {
 
 pub fn now_unix() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64()
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(u64::MAX as u128) as u64
 }
 
 type LogItem = Option<(Value, Option<Value>)>;
@@ -220,6 +317,32 @@ impl LogThread {
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod trend_tests {
+    use super::*;
+
+    #[test]
+    fn history_defaults_to_36_hours_and_streams_only_new_samples() {
+        assert_eq!(State::with_history_window_hours(DEFAULT_HISTORY_WINDOW_HOURS).trend_snapshot(None).window_seconds, 36 * 3600);
+        let mut history = TrendHistory::new(60);
+        history.record_temperature(1_000_000, 82);
+        history.record_hashrate(1_001_000, 300.0, 275.0);
+        let initial = history.snapshot(None, 1_002_000);
+        assert!(initial.reset);
+        assert_eq!(initial.temperature.len(), 1);
+        assert_eq!(initial.hashrate.len(), 1);
+        let delta = history.snapshot(Some(initial.cursor), 1_003_000);
+        assert!(!delta.reset);
+        assert!(delta.temperature.is_empty());
+        history.record_temperature(1_100_000, 84);
+        let stale = history.snapshot(Some(0), 1_100_000);
+        assert!(stale.reset);
+        assert_eq!(stale.temperature.len(), 1);
+        assert_eq!(stale.temperature[0].temperature_c, 84);
+        assert!(stale.hashrate.is_empty());
     }
 }
 

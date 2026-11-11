@@ -42,6 +42,7 @@ pub struct MineArgs {
     pub web_listen: Option<String>,
     pub web_allow_net: Vec<String>,
     pub restore_power_limit_script: Option<PathBuf>,
+    pub history_window_hours: u32,
     pub nonce_start: Option<u64>,
     pub reconnect_seconds: u64,
 }
@@ -89,7 +90,7 @@ pub fn run(a: MineArgs) -> Result<i32> {
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
     }
     let restore_power = crate::power::RestorePowerLimit::new(a.restore_power_limit_script.clone());
-    let state = State::new();
+    let state = State::with_history_window_hours(a.history_window_hours);
     let started = Instant::now();
     let web = match &a.web_listen {
         Some(bind) => Some(crate::web::WebServer::start(bind, state.clone(), started, &a.web_allow_net, a.log_path.clone())?),
@@ -360,7 +361,9 @@ fn mining_loop(
                 }
             }
             if last_stats.elapsed() > Duration::from_secs(30) {
-                log.event("stats", stats_row(state, st, priority.is_some()));
+                let row = stats_row(state, st, priority.is_some());
+                state.record_hashrate(row["TMAC_wall_s"].as_f64().unwrap_or(0.0), row["submitted_TH_s_30m"].as_f64().unwrap_or(0.0));
+                log.event("stats", row);
                 last_stats = Instant::now();
             }
         }
