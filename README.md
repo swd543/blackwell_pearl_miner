@@ -81,10 +81,11 @@ binary, so `target/release/bpm` is the only file needed at run time.
 waits for outstanding pool acknowledgements. A second Ctrl+C exits immediately.
 
 For power-limit restoration, pass only a trusted local policy helper, for example
-`--restore-power-limit-script /home/buga/code/mining/plimit.sh`. It is invoked directly (not via
-a shell) with `300`; the helper remains responsible for privilege checks. This callback runs on
-normal/error shutdown and the first SIGINT/SIGTERM, but cannot run after SIGKILL, power loss, or
-a forced second signal. A service manager's stop-post cleanup should remain the final backstop.
+`--restore-power-limit-script ./scripts/power-limit.sh`. That helper allows only 250 W and 300 W
+and invokes `/usr/bin/nvidia-smi` through the existing non-interactive sudo rule; the miner
+itself never changes power limits. It is invoked directly (not via a shell) with `300` on normal
+or error shutdown and the first SIGINT/SIGTERM, but cannot run after SIGKILL, power loss, or a
+forced second signal. Keep an external cleanup backstop for those cases.
 
 The HTTP endpoint is deliberately opt-in and unauthenticated. For local portal integration use
 `--web-listen 127.0.0.1:52694`; to serve a trusted LAN, bind to a specific LAN address and use the
