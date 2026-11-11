@@ -6,10 +6,12 @@ mod kernels;
 mod miner;
 mod nvml;
 mod pool;
+mod power;
 mod priority;
 mod proof;
 mod protocol;
 mod state;
+mod web;
 mod workers;
 
 use anyhow::{bail, ensure, Result};
@@ -84,6 +86,12 @@ struct Cli {
     /// JSONL event log (default: logs/bpm-<time>.jsonl in the working directory)
     #[arg(long)]
     log: Option<PathBuf>,
+    /// Optional read-only HTTP stats bind (disabled by default; no authentication)
+    #[arg(long, value_name = "IP:PORT")]
+    web_listen: Option<String>,
+    /// Trusted helper invoked with argument 300 on normal/error/first-signal shutdown
+    #[arg(long, value_name = "SCRIPT")]
+    restore_power_limit_script: Option<PathBuf>,
     /// Seconds between pool reconnect attempts
     #[arg(long, default_value_t = 5)]
     reconnect_seconds: u64,
@@ -162,6 +170,8 @@ fn main() -> Result<()> {
         depth: cli.depth as usize,
         queue_size: cli.queue_size,
         max_inflight: cli.max_inflight,
+        web_listen: cli.web_listen,
+        restore_power_limit_script: cli.restore_power_limit_script,
         priority: cli.priority,
         background: cli.background,
         priority_resume_delay: cli.priority_resume_delay,

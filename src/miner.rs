@@ -39,6 +39,8 @@ pub struct MineArgs {
     pub max_temp: u32,
     pub device: i32,
     pub log_path: PathBuf,
+    pub web_listen: Option<String>,
+    pub restore_power_limit_script: Option<PathBuf>,
     pub nonce_start: Option<u64>,
     pub reconnect_seconds: u64,
 }
@@ -85,15 +87,26 @@ pub fn run(a: MineArgs) -> Result<i32> {
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
     }
+    let restore_power = crate::power::RestorePowerLimit::new(a.restore_power_limit_script.clone());
     let state = State::new();
+    let started = Instant::now();
+    let web = match &a.web_listen {
+        Some(bind) => Some(crate::web::WebServer::start(bind, state.clone(), started)?),
+        None => None,
+    };
     let log_thread = Log::start(a.log_path.clone(), a.json, state.clone())?;
     let log = log_thread.log.clone();
+    if let Some(server) = &web {
+        log.event("web_stats", json!({"bind":server.local_addr().to_string()}));
+    }
     let result = mine(&a, &state, &log);
     if let Err(e) = &result {
         log.event("error", json!({"error": format!("{e:#}")}));
     }
     state.abort.store(true, Ordering::SeqCst);
     log_thread.close();
+    drop(web);
+    drop(restore_power);
     result
 }
 
@@ -264,12 +277,14 @@ fn mining_loop(
         let holder = p.holder();
         let drain = holder["detected_at"].as_f64().map(|d| crate::state::now_unix() - d).unwrap_or(0.0);
         log.event("priority_pause", merge(&[holder, json!({"drain_s":drain})]));
+        state.gpu_paused.store(true, Ordering::SeqCst);
         while p.is_busy() && !stop() && !time_up(st) {
             check()?;
             std::thread::sleep(Duration::from_millis(100));
         }
         let paused = began.elapsed().as_secs_f64();
         st.paused += paused;
+        state.gpu_paused.store(false, Ordering::SeqCst);
         log.event("priority_resume", json!({"paused_seconds":paused,"pauses":st.pauses}));
         Ok(())
     };

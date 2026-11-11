@@ -64,6 +64,7 @@ pub struct Counters {
 pub struct State {
     latest: Mutex<Option<Generation>>,
     pub ready: AtomicBool,
+    pub gpu_paused: AtomicBool,
     pub stop_mining: AtomicBool,
     pub abort: AtomicBool,
     error: Mutex<Option<String>>,
@@ -78,6 +79,7 @@ impl State {
         Arc::new(State {
             latest: Mutex::new(None),
             ready: AtomicBool::new(false),
+            gpu_paused: AtomicBool::new(false),
             stop_mining: AtomicBool::new(false),
             abort: AtomicBool::new(false),
             error: Mutex::new(None),

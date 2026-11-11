@@ -1,5 +1,7 @@
 # blackwell_pearl_miner (bpm)
 
+This is the `swd543` fork of [pushsoftnow/blackwell_pearl_miner](https://github.com/pushsoftnow/blackwell_pearl_miner), retaining the upstream repository name and Rust/CUDA implementation.
+
 PearlHash pool miner for NVIDIA Blackwell GPUs with compute capability 12.0 (sm_120).
 The host program is written in Rust; the mining kernels are CUDA C++.
 
@@ -8,7 +10,7 @@ Every share is checked with the official Pearl verifier (`zk-pow`) before it is 
 ## Quickstart (Kryptex pool)
 
 ```bash
-git clone --recursive https://github.com/pushsoftnow/blackwell_pearl_miner.git
+git clone --recursive https://github.com/swd543/blackwell_pearl_miner.git
 cd blackwell_pearl_miner
 cargo build --release
 ./target/release/bpm --pool prl-eu.kryptex.network:7048 --wallet YOUR_KRYPTEX_ID --worker rig1
@@ -40,7 +42,7 @@ Other compute capability 12.0 GPUs are expected to work but have not been tested
 ## Build
 
 ```bash
-git clone --recursive https://github.com/pushsoftnow/blackwell_pearl_miner.git
+git clone --recursive https://github.com/swd543/blackwell_pearl_miner.git
 cd blackwell_pearl_miner
 cargo build --release
 ```
@@ -69,12 +71,24 @@ binary, so `target/release/bpm` is the only file needed at run time.
 | `--power-limit W` | Stop unless the GPU power limit equals W (not checked by default) |
 | `--max-temp C` | Stop at this GPU temperature (default 85 °C) |
 | `--log PATH` | JSONL event log (default `logs/bpm-<time>.jsonl`) |
+| `--restore-power-limit-script PATH` | On graceful exit, run this trusted helper with `300` as its only argument; the miner itself never changes power limits |
+| `--web-listen IP:PORT` | Optional read-only HTTP dashboard and `/api/v1/stats` JSON endpoint; disabled by default |
 | `--json` | Print events as JSON lines |
 | `--priority PATH` | Yield the GPU to a program, see below |
 | `--background` | Yield the GPU to every other program that computes on it |
 
 `--help` lists all options. Stop the miner with Ctrl+C; it finishes the rounds in flight and
 waits for outstanding pool acknowledgements. A second Ctrl+C exits immediately.
+
+For power-limit restoration, pass only a trusted local policy helper, for example
+`--restore-power-limit-script /home/buga/code/mining/plimit.sh`. It is invoked directly (not via
+a shell) with `300`; the helper remains responsible for privilege checks. This callback runs on
+normal/error shutdown and the first SIGINT/SIGTERM, but cannot run after SIGKILL, power loss, or
+a forced second signal. A service manager's stop-post cleanup should remain the final backstop.
+
+The HTTP endpoint is deliberately opt-in and unauthenticated. For local portal integration use
+`--web-listen 127.0.0.1:52694`; to serve a trusted LAN, bind to a specific LAN address and use the
+host firewall to restrict clients. Do not bind it to a public interface.
 
 ### Kernel profiles
 
