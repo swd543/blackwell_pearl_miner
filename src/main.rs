@@ -89,6 +89,9 @@ struct Cli {
     /// Optional read-only HTTP stats bind (disabled by default; no authentication)
     #[arg(long, value_name = "IP:PORT")]
     web_listen: Option<String>,
+    /// LAN CIDR allowed to access the stats page (repeatable; loopback is always allowed)
+    #[arg(long, value_name = "CIDR", requires = "web_listen")]
+    web_allow_net: Vec<String>,
     /// Trusted helper invoked with argument 300 on normal/error/first-signal shutdown
     #[arg(long, value_name = "SCRIPT")]
     restore_power_limit_script: Option<PathBuf>,
@@ -171,6 +174,7 @@ fn main() -> Result<()> {
         queue_size: cli.queue_size,
         max_inflight: cli.max_inflight,
         web_listen: cli.web_listen,
+        web_allow_net: cli.web_allow_net,
         restore_power_limit_script: cli.restore_power_limit_script,
         priority: cli.priority,
         background: cli.background,

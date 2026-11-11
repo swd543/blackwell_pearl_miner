@@ -40,6 +40,7 @@ pub struct MineArgs {
     pub device: i32,
     pub log_path: PathBuf,
     pub web_listen: Option<String>,
+    pub web_allow_net: Vec<String>,
     pub restore_power_limit_script: Option<PathBuf>,
     pub nonce_start: Option<u64>,
     pub reconnect_seconds: u64,
@@ -91,7 +92,7 @@ pub fn run(a: MineArgs) -> Result<i32> {
     let state = State::new();
     let started = Instant::now();
     let web = match &a.web_listen {
-        Some(bind) => Some(crate::web::WebServer::start(bind, state.clone(), started)?),
+        Some(bind) => Some(crate::web::WebServer::start(bind, state.clone(), started, &a.web_allow_net)?),
         None => None,
     };
     let log_thread = Log::start(a.log_path.clone(), a.json, state.clone())?;

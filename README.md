@@ -87,9 +87,18 @@ itself never changes power limits. It is invoked directly (not via a shell) with
 or error shutdown and the first SIGINT/SIGTERM, but cannot run after SIGKILL, power loss, or a
 forced second signal. Keep an external cleanup backstop for those cases.
 
-The HTTP endpoint is deliberately opt-in and unauthenticated. For local portal integration use
-`--web-listen 127.0.0.1:52694`; to serve a trusted LAN, bind to a specific LAN address and use the
-host firewall to restrict clients. Do not bind it to a public interface.
+The HTTP endpoint is deliberately opt-in and unauthenticated. Loopback is always allowed; other
+clients are denied unless explicitly listed with repeatable `--web-allow-net` CIDRs. The LAN
+page uses port 52693 to match the previous portal. Example for these host LANs:
+
+```bash
+--web-listen 0.0.0.0:52693 \
+--web-allow-net 192.168.50.0/24 \
+--web-allow-net 192.168.68.0/24
+```
+
+Only list trusted local subnets, and keep the host firewall enabled; do not expose the page to a
+public network.
 
 ### Kernel profiles
 
