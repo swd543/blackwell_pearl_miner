@@ -92,7 +92,7 @@ pub fn run(a: MineArgs) -> Result<i32> {
     let state = State::new();
     let started = Instant::now();
     let web = match &a.web_listen {
-        Some(bind) => Some(crate::web::WebServer::start(bind, state.clone(), started, &a.web_allow_net)?),
+        Some(bind) => Some(crate::web::WebServer::start(bind, state.clone(), started, &a.web_allow_net, a.log_path.clone())?),
         None => None,
     };
     let log_thread = Log::start(a.log_path.clone(), a.json, state.clone())?;
@@ -117,7 +117,7 @@ fn mine(a: &MineArgs, state: &Arc<State>, log: &Log) -> Result<i32> {
         "k":profile.k,"seconds":a.seconds,"log_path":a.log_path.display().to_string()}));
     let device = Device::open(a.device)?;
     let info = device.info()?;
-    let guard = Guard::start(&info.pci_bus_id, a.power_limit, a.max_temp).context("NVML telemetry")?;
+    let guard = Guard::start(&info.pci_bus_id, a.power_limit, a.max_temp, state.clone()).context("NVML telemetry")?;
     anyhow::ensure!(info.capability == (12, 0), "the kernels are built for compute capability 12.0 (found {} with {}.{})", info.name, info.capability.0, info.capability.1);
 
     let (proof_tx, proof_rx) = bounded::<Option<ProofTask>>(a.queue_size);

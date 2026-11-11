@@ -1,5 +1,6 @@
 //! Read-only NVML (libnvidia-ml.so.1, shipped with the driver): telemetry guard,
 //! GPU process list and per-process SM utilisation.
+use crate::state::State;
 use anyhow::{bail, Result};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CString};
@@ -168,10 +169,11 @@ pub struct Guard {
 }
 
 impl Guard {
-    pub fn start(pci_bus_id: &str, power_limit_w: Option<f64>, max_temp_c: u32) -> Result<Self> {
+    pub fn start(pci_bus_id: &str, power_limit_w: Option<f64>, max_temp_c: u32, state: Arc<State>) -> Result<Self> {
         let nvml = Nvml::open(pci_bus_id)?;
-        let sample = move |n: &Nvml| -> Result<()> {
+        let sample = move |n: &Nvml, state: &State| -> Result<()> {
             let (t, p) = (n.temperature_c()?, n.power_limit_w()?);
+            state.update_gpu_telemetry(t, p);
             if t >= max_temp_c {
                 bail!("mining stopped: GPU temperature {t} °C (limit {max_temp_c} °C)");
             }
@@ -182,7 +184,7 @@ impl Guard {
             }
             Ok(())
         };
-        sample(&nvml)?;
+        sample(&nvml, &state)?;
         let stop = Arc::new(AtomicBool::new(false));
         let error = Arc::new(Mutex::new(None));
         let (s, e) = (stop.clone(), error.clone());
@@ -194,7 +196,7 @@ impl Guard {
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
-                if let Err(err) = sample(&nvml) {
+                if let Err(err) = sample(&nvml, &state) {
                     *e.lock().unwrap() = Some(format!("{err:#}"));
                     return;
                 }

@@ -98,7 +98,11 @@ page uses port 52693 to match the previous portal. Example for these host LANs:
 ```
 
 Only list trusted local subnets, and keep the host firewall enabled; do not expose the page to a
-public network.
+public network. The dashboard includes a bounded tail of formatted miner events and GPU
+core temperature/power-limit readings. Temperature comes from the miner's existing 5-second
+safety-guard sample; the web page adds no GPU polling thread. Event tailing reads at most 128 KiB
+from the existing JSONL log when a stats request arrives, omits the startup row, and returns only
+a small allowlist of formatted event types.
 
 ### Kernel profiles
 

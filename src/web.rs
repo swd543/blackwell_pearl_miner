@@ -5,8 +5,11 @@
 use crate::state::State;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use std::io::{Read, Write};
+use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -25,7 +28,7 @@ body{min-height:100dvh;display:flex;flex-direction:column}
 .reason{margin:6px 0 12px;font-size:.82rem;color:#a7aebb}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
 .tile{background:#1a1e26;border:1px solid #262b36;border-radius:12px;padding:8px 10px;min-width:0}.tile.wide{grid-column:span 2}
 .tile .k{font-size:.66rem;letter-spacing:.07em;text-transform:uppercase;color:#8a93a5}.tile .v{font-size:1.22rem;font-weight:650;margin-top:2px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-.tile .v small{font-size:.68rem;color:#8a93a5;font-weight:400}.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:.76rem;color:#8a93a5;margin-top:12px;border-top:1px solid #262b36;padding-top:10px}
+.tile .v small{font-size:.68rem;color:#8a93a5;font-weight:400}.tile.hot .v{color:#ffb36b}.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:.76rem;color:#8a93a5;margin-top:12px;border-top:1px solid #262b36;padding-top:10px}
 .kv b{color:#c6cbd4;font-weight:500;overflow-wrap:anywhere}pre{color:#9aa2ad;font-size:.72rem;line-height:1.6;white-space:pre-wrap;font-family:ui-monospace,monospace;margin:12px 0 0;flex:1;min-height:90px;overflow-y:auto;padding-right:4px}
 .hint{color:#6f7683;font-size:.7rem;margin:10px 0 0}
 </style></head><body><div class="card">
@@ -37,16 +40,21 @@ body{min-height:100dvh;display:flex;flex-direction:column}
 <div class="tile"><div class="k">Rejected</div><div class="v" id="rejected">—</div></div>
 <div class="tile"><div class="k">Stale</div><div class="v" id="stale">—</div></div>
 <div class="tile"><div class="k">Uptime</div><div class="v" id="uptime">—</div></div>
+<div class="tile"><div class="k">GPU temp</div><div class="v" id="temperature">—</div></div>
+<div class="tile"><div class="k">Power limit</div><div class="v" id="power-limit">—</div></div>
 </div>
 <div class="kv"><span>Job</span><b id="job">—</b><span>Updated</span><b id="updated">—</b></div>
-<pre id="detail">Read-only · stats refresh every 5 seconds.</pre>
+<div class="sub" style="margin-top:12px">Recent miner events</div>
+<pre id="detail">Loading recent events…</pre>
 <p class="hint">Read-only · Pearl / Kryptex · no credentials are displayed</p>
 </div><script>
 const el=id=>document.getElementById(id), fmt=n=>Number.isFinite(Number(n))?Number(n).toLocaleString():"—";
 function duration(s){s=Math.max(0,Math.floor(Number(s)||0));let h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?`${h}h ${m}m`:`${m}m ${s%60}s`}
 async function update(){try{const r=await fetch('/api/v1/stats',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);const s=await r.json();const b=el('badge');
 const mode={mining:['MINING','up','Mining'],yielding:['YIELDING','','Yielding GPU to other work'],connecting:['WAITING','','Connecting to pool'],stopping:['STOPPING','bad','Miner is stopping']};const v=mode[s.status]||['UNKNOWN','bad','Miner status unavailable'];b.textContent=v[0];b.className='badge '+v[1];el('reason').textContent=v[2];
-el('rate').textContent=fmt(s.rate?.submitted_TH_s_30m);el('accepted').textContent=fmt(s.accepted);el('rejected').textContent=fmt(s.rejected);el('stale').textContent=fmt(s.stale);el('uptime').textContent=duration(s.uptime_seconds);el('job').textContent=s.job_id||'—';el('updated').textContent=new Date().toLocaleTimeString();el('detail').textContent=`Shares in rate window: ${fmt(s.rate?.submitted_shares_30m)}\nRate window: ${fmt(s.rate?.submitted_window_s)} seconds\nAPI: /api/v1/stats`;
+el('rate').textContent=fmt(s.rate?.submitted_TH_s_30m);el('accepted').textContent=fmt(s.accepted);el('rejected').textContent=fmt(s.rejected);el('stale').textContent=fmt(s.stale);el('uptime').textContent=duration(s.uptime_seconds);el('job').textContent=s.job_id||'—';el('updated').textContent=new Date().toLocaleTimeString();
+const temp=s.gpu?.temperature_c;el('temperature').textContent=temp==null?'—':`${fmt(temp)} °C`;el('temperature').closest('.tile').classList.toggle('hot',Number(temp)>=85);const limit=s.gpu?.power_limit_w;el('power-limit').textContent=limit==null?'—':`${fmt(limit)} W`;
+el('detail').textContent=(s.events||[]).join('\n')||'No recent miner events.';
 }catch(e){el('badge').textContent='OFFLINE';el('badge').className='badge bad';el('reason').textContent='Stats unavailable: '+e;}}
 update();setInterval(update,5000);
 </script></body></html>"##;
@@ -96,7 +104,7 @@ pub struct WebServer {
 }
 
 impl WebServer {
-    pub fn start(bind: &str, state: Arc<State>, started: Instant, allow_nets: &[String]) -> Result<Self> {
+    pub fn start(bind: &str, state: Arc<State>, started: Instant, allow_nets: &[String], log_path: PathBuf) -> Result<Self> {
         let allowed_nets = allow_nets.iter().map(|net| AllowedNet::parse(net)).collect::<Result<Vec<_>>>()?;
         let listener = TcpListener::bind(bind).with_context(|| format!("web stats bind {bind}"))?;
         listener.set_nonblocking(true)?;
@@ -108,7 +116,7 @@ impl WebServer {
                 match listener.accept() {
                     Ok((stream, peer)) => {
                         if peer.ip().is_loopback() || allowed_nets.iter().any(|net| net.contains(peer.ip())) {
-                            serve(stream, &state, started);
+                            serve(stream, &state, started, &log_path);
                         }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(100)),
@@ -136,9 +144,10 @@ impl Drop for WebServer {
     }
 }
 
-fn stats(state: &State, started: Instant) -> Value {
+fn stats(state: &State, started: Instant, log_path: &Path) -> Value {
     let counters = state.counters();
     let rate = state.share_rate.lock().unwrap().snapshot();
+    let telemetry = state.gpu_telemetry();
     let job_id = state.job().map(|g| g.job.job_id.clone());
     json!({
         "status": if state.abort.load(Ordering::SeqCst) { "stopping" } else if !state.ready.load(Ordering::SeqCst) { "connecting" } else if state.gpu_paused.load(Ordering::SeqCst) { "yielding" } else { "mining" },
@@ -147,8 +156,39 @@ fn stats(state: &State, started: Instant) -> Value {
         "accepted": counters.accepted,
         "rejected": counters.rejected,
         "stale": counters.stale,
-        "rate": rate
+        "rate": rate,
+        "gpu": {"temperature_c":telemetry.temperature_c,"power_limit_w":telemetry.power_limit_w},
+        "events": recent_events(log_path)
     })
+}
+
+const EVENT_TAIL_BYTES: u64 = 131_072;
+const EVENT_TAIL_COUNT: usize = 20;
+const SAFE_EVENTS: &[&str] = &["authorized", "job", "mining", "share", "stats", "complete", "share_discarded", "round_discarded", "priority_pause", "priority_resume", "disconnected", "profile_fallback", "error"];
+
+/// Format a bounded tail of existing JSONL events; never includes the startup row (which has the wallet).
+fn recent_events(path: &Path) -> Vec<String> {
+    let Ok(mut file) = File::open(path) else { return Vec::new() };
+    let Ok(len) = file.metadata().map(|m| m.len()) else { return Vec::new() };
+    let start = len.saturating_sub(EVENT_TAIL_BYTES);
+    if file.seek(SeekFrom::Start(start)).is_err() { return Vec::new(); }
+    let mut reader = BufReader::new(file);
+    if start > 0 {
+        let mut partial = String::new();
+        if reader.read_line(&mut partial).is_err() { return Vec::new(); }
+    }
+    let mut tail = VecDeque::with_capacity(EVENT_TAIL_COUNT);
+    for line in reader.lines().flatten() {
+        let Ok(row) = serde_json::from_str::<Value>(&line) else { continue };
+        let event = row["event"].as_str().unwrap_or_default();
+        if !SAFE_EVENTS.contains(&event) { continue; }
+        let formatted = crate::console::format_event(&row);
+        if !formatted.is_empty() {
+            tail.push_back(formatted);
+            if tail.len() > EVENT_TAIL_COUNT { tail.pop_front(); }
+        }
+    }
+    tail.into_iter().collect()
 }
 
 fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &str) {
@@ -161,7 +201,7 @@ fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &str)
     let _ = stream.flush();
 }
 
-fn serve(mut stream: TcpStream, state: &State, started: Instant) {
+fn serve(mut stream: TcpStream, state: &State, started: Instant, log_path: &Path) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(300)));
     let mut buf = [0u8; 2048];
@@ -180,7 +220,7 @@ fn serve(mut stream: TcpStream, state: &State, started: Instant) {
     match path {
         "/" => respond(&mut stream, "200 OK", "text/html", DASHBOARD),
         "/api/v1/stats" | "/health" => {
-            let body = stats(state, started).to_string();
+            let body = stats(state, started, log_path).to_string();
             respond(&mut stream, "200 OK", "application/json", &body);
         }
         _ => respond(&mut stream, "404 Not Found", "text/plain", "not found\n"),
@@ -210,10 +250,27 @@ mod tests {
         state.counters.lock().unwrap().accepted = 7;
         state.ready.store(true, Ordering::SeqCst);
         state.gpu_paused.store(true, Ordering::SeqCst);
-        let row = stats(&state, start);
+        state.update_gpu_telemetry(74, 250.0);
+        let row = stats(&state, start, Path::new("/dev/null"));
         assert_eq!(row["status"], "yielding");
         assert_eq!(row["accepted"], 7);
+        assert_eq!(row["gpu"]["temperature_c"], 74);
+        assert_eq!(row["gpu"]["power_limit_w"], 250.0);
         assert!(row.get("wallet").is_none());
+    }
+
+    #[test]
+    fn log_tail_is_bounded_to_safe_formatted_events() {
+        let path = std::env::temp_dir().join(format!("bpm-web-log-{}.jsonl", std::process::id()));
+        let startup = json!({"time":1.0,"event":"startup","wallet":"do-not-display"});
+        let share = json!({"time":2.0,"event":"share","accepted":true,"accepted_total":1,"rejected_total":0,"roundtrip_ms":42.0});
+        let unknown = json!({"time":3.0,"event":"private_event","secret":"do-not-display"});
+        std::fs::write(&path, format!("{startup}\n{share}\n{unknown}\n")).unwrap();
+        let events = recent_events(&path);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("SHARE ACCEPTED"));
+        assert!(!events.join("\n").contains("do-not-display"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -221,7 +278,7 @@ mod tests {
         let state = State::new();
         state.ready.store(true, Ordering::SeqCst);
         state.counters.lock().unwrap().accepted = 3;
-        let server = WebServer::start("127.0.0.1:0", state.clone(), Instant::now(), &[]).unwrap();
+        let server = WebServer::start("127.0.0.1:0", state.clone(), Instant::now(), &[], PathBuf::from("/dev/null")).unwrap();
         let mut stream = TcpStream::connect(server.local_addr()).unwrap();
         stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
         let mut response = String::new();

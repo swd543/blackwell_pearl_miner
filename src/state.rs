@@ -61,6 +61,12 @@ pub struct Counters {
     pub stale: u64,
 }
 
+#[derive(Default, Clone, Copy)]
+pub struct GpuTelemetry {
+    pub temperature_c: Option<u32>,
+    pub power_limit_w: Option<f64>,
+}
+
 pub struct State {
     latest: Mutex<Option<Generation>>,
     pub ready: AtomicBool,
@@ -71,6 +77,7 @@ pub struct State {
     pub counters: Mutex<Counters>,
     pub compression: Mutex<Option<String>>,
     pub share_rate: Mutex<ShareRate>,
+    pub gpu_telemetry: Mutex<GpuTelemetry>,
     submit_previous: bool,
 }
 
@@ -86,6 +93,7 @@ impl State {
             counters: Mutex::new(Counters::default()),
             compression: Mutex::new(None),
             share_rate: Mutex::new(ShareRate::new()),
+            gpu_telemetry: Mutex::new(GpuTelemetry::default()),
             submit_previous: std::env::var("PEARL_SUBMIT_PREVIOUS_JOB").map(|v| v != "0").unwrap_or(true),
         })
     }
@@ -116,6 +124,12 @@ impl State {
     }
     pub fn counters(&self) -> Counters {
         *self.counters.lock().unwrap()
+    }
+    pub fn update_gpu_telemetry(&self, temperature_c: u32, power_limit_w: f64) {
+        *self.gpu_telemetry.lock().unwrap() = GpuTelemetry { temperature_c: Some(temperature_c), power_limit_w: Some(power_limit_w) };
+    }
+    pub fn gpu_telemetry(&self) -> GpuTelemetry {
+        *self.gpu_telemetry.lock().unwrap()
     }
     pub fn add_stale(&self, n: u64) {
         self.counters.lock().unwrap().stale += n;
