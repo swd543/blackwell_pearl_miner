@@ -104,8 +104,9 @@ temperature/power-limit readings. Temperature reuses the miner's existing 5-seco
 sample; no extra GPU polling is added. The power tile is the configured limit, not actual draw; no
 additional NVML power-usage query is made. Temperature samples and existing 30-second hashrate stats
 are retained in bounded RAM rings and streamed initially/incrementally to the chart; the default
-36-hour window uses about 1 MiB of ring storage. No history is written to disk, so it starts fresh
-when the miner restarts. Event tailing reads at most 128 KiB from the existing JSONL log when a
+The time axis expands to available history, then caps at the configured window instead of
+compressing early samples against an empty 36-hour span. The default 36-hour window uses about
+1 MiB of ring storage. No history is written to disk, so it starts fresh when the miner restarts. Event tailing reads at most 128 KiB from the existing JSONL log when a
 stats request arrives, omits the startup row, and returns only a small allowlist of formatted event
 types.
 
