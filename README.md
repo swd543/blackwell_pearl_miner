@@ -68,10 +68,10 @@ binary, so `target/release/bpm` is the only file needed at run time.
 | `--seconds N` | Stop after N seconds (default: unlimited) |
 | `--device N` | CUDA device ordinal (default 0) |
 | `--variant 780\|448`, `--k K` | Kernel profile (default: kernel 780 with K = 65536) |
-| `--power-limit W` | Stop unless the GPU power limit equals W (not checked by default) |
+| `--power-limit W` | Require this GPU power limit while mining (not checked by default); with the helper, 250 W switches to 300 W while yielded |
 | `--max-temp C` | Stop at this GPU temperature (default 85 °C) |
 | `--log PATH` | JSONL event log (default `logs/bpm-<time>.jsonl`) |
-| `--restore-power-limit-script PATH` | On graceful exit, run this trusted helper with `300` as its only argument; the miner itself never changes power limits |
+| `--restore-power-limit-script PATH` | Run this trusted helper with `300` on exit and, for a 250 W mining limit, while yielded; reapply 250 W before resuming |
 | `--web-listen IP:PORT` | Optional read-only HTTP dashboard and stats/history JSON endpoints; disabled by default |
 | `--history-window-hours N` | In-memory GPU temperature/hashrate history, default 36 hours (1.5 days), range 1–168 |
 | `--json` | Print events as JSON lines |
@@ -83,10 +83,11 @@ waits for outstanding pool acknowledgements. A second Ctrl+C exits immediately.
 
 For power-limit restoration, pass only a trusted local policy helper, for example
 `--restore-power-limit-script ./scripts/power-limit.sh`. That helper allows only 250 W and 300 W
-and invokes `/usr/bin/nvidia-smi` through the existing non-interactive sudo rule; the miner
-itself never changes power limits. It is invoked directly (not via a shell) with `300` on normal
-or error shutdown and the first SIGINT/SIGTERM, but cannot run after SIGKILL, power loss, or a
-forced second signal. Keep an external cleanup backstop for those cases.
+and invokes `/usr/bin/nvidia-smi` through the existing non-interactive sudo rule; the miner itself
+never invokes `nvidia-smi`. When paired with `--power-limit 250`, BPM calls the helper with `300`
+while yielded and reapplies `250` before resuming. It also restores `300` on normal/error shutdown
+and the first SIGINT/SIGTERM, but cannot run after SIGKILL, power loss, or a forced second signal.
+Keep an external cleanup backstop for those cases.
 
 The HTTP endpoint is deliberately opt-in and unauthenticated. Loopback is always allowed; other
 clients are denied unless explicitly listed with repeatable `--web-allow-net` CIDRs. The LAN

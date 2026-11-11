@@ -169,7 +169,13 @@ pub struct Guard {
 }
 
 impl Guard {
-    pub fn start(pci_bus_id: &str, power_limit_w: Option<f64>, max_temp_c: u32, state: Arc<State>) -> Result<Self> {
+    pub fn start(
+        pci_bus_id: &str,
+        power_limit_w: Option<f64>,
+        yielded_power_limit_w: Option<f64>,
+        max_temp_c: u32,
+        state: Arc<State>,
+    ) -> Result<Self> {
         let nvml = Nvml::open(pci_bus_id)?;
         let sample = move |n: &Nvml, state: &State| -> Result<()> {
             let (t, p) = (n.temperature_c()?, n.power_limit_w()?);
@@ -178,7 +184,8 @@ impl Guard {
                 bail!("mining stopped: GPU temperature {t} °C (limit {max_temp_c} °C)");
             }
             if let Some(required) = power_limit_w {
-                if (p - required).abs() > 0.5 {
+                let paused = state.gpu_paused.load(Ordering::SeqCst);
+                if !power_limit_matches(p, required, paused, yielded_power_limit_w) {
                     bail!("mining stopped: power limit {p} W, required {required} W");
                 }
             }
@@ -209,6 +216,25 @@ impl Guard {
             bail!("{e}");
         }
         Ok(())
+    }
+}
+
+fn power_limit_matches(actual: f64, required: f64, paused: bool, yielded_limit: Option<f64>) -> bool {
+    (actual - required).abs() <= 0.5
+        || (paused && yielded_limit.is_some_and(|limit| (actual - limit).abs() <= 0.5))
+}
+
+#[cfg(test)]
+mod power_guard_tests {
+    use super::power_limit_matches;
+
+    #[test]
+    fn accepts_restored_limit_only_while_yielded() {
+        assert!(power_limit_matches(250.0, 250.0, false, Some(300.0)));
+        assert!(power_limit_matches(300.0, 250.0, true, Some(300.0)));
+        assert!(!power_limit_matches(300.0, 250.0, false, Some(300.0)));
+        assert!(!power_limit_matches(300.0, 250.0, true, None));
+        assert!(!power_limit_matches(280.0, 250.0, true, Some(300.0)));
     }
 }
 

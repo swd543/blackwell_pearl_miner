@@ -101,7 +101,7 @@ pub fn run(a: MineArgs) -> Result<i32> {
     if let Some(server) = &web {
         log.event("web_stats", json!({"bind":server.local_addr().to_string()}));
     }
-    let result = mine(&a, &state, &log);
+    let result = mine(&a, &state, &log, &restore_power);
     if let Err(e) = &result {
         log.event("error", json!({"error": format!("{e:#}")}));
     }
@@ -112,13 +112,14 @@ pub fn run(a: MineArgs) -> Result<i32> {
     result
 }
 
-fn mine(a: &MineArgs, state: &Arc<State>, log: &Log) -> Result<i32> {
+fn mine(a: &MineArgs, state: &Arc<State>, log: &Log, power_policy: &crate::power::RestorePowerLimit) -> Result<i32> {
     let mut profile = a.profile;
     log.event("startup", json!({"endpoint":a.pool,"wallet":a.wallet,"worker":a.worker,"variant":profile.variant(),
         "k":profile.k,"seconds":a.seconds,"log_path":a.log_path.display().to_string()}));
     let device = Device::open(a.device)?;
     let info = device.info()?;
-    let guard = Guard::start(&info.pci_bus_id, a.power_limit, a.max_temp, state.clone()).context("NVML telemetry")?;
+    let yielded_power_limit = power_policy.manages_yield(a.power_limit).then_some(f64::from(crate::power::YIELDED_LIMIT_W));
+    let guard = Guard::start(&info.pci_bus_id, a.power_limit, yielded_power_limit, a.max_temp, state.clone()).context("NVML telemetry")?;
     anyhow::ensure!(info.capability == (12, 0), "the kernels are built for compute capability 12.0 (found {} with {}.{})", info.name, info.capability.0, info.capability.1);
 
     let (proof_tx, proof_rx) = bounded::<Option<ProofTask>>(a.queue_size);
@@ -175,7 +176,7 @@ fn mine(a: &MineArgs, state: &Arc<State>, log: &Log) -> Result<i32> {
         st.start = Instant::now();
         state.share_rate.lock().unwrap().reset(st.start);
         st.cpu_start = cpu_seconds();
-        mining_loop(a, state, log, &mut engine, priority.as_ref(), &check, &proof_tx, &mut st)?;
+        mining_loop(a, state, log, power_policy, &mut engine, priority.as_ref(), &check, &proof_tx, &mut st)?;
     }
     // Every completed current-job result is handed off before the sentinel.
     put(&proof_tx, None, state)?;
@@ -256,6 +257,7 @@ fn mining_loop(
     a: &MineArgs,
     state: &Arc<State>,
     log: &Log,
+    power_policy: &crate::power::RestorePowerLimit,
     engine: &mut Engine,
     priority: Option<&PriorityWatch>,
     check: &dyn Fn() -> Result<()>,
@@ -267,6 +269,7 @@ fn mining_loop(
     let time_up = |st: &Stats| a.seconds > 0.0 && st.start.elapsed().as_secs_f64() >= a.seconds;
     let stop = || state.stop_mining.load(Ordering::SeqCst) || interrupted();
     let yielding = || priority.map(|p| p.is_busy()).unwrap_or(false);
+    let manage_yield_power = power_policy.manages_yield(a.power_limit);
     let mut clock = RoundClock { last: None, skip: 2, reference: VecDeque::new(), slowdown: 1.0 + a.priority_slowdown / 100.0 };
     let mut last_stats = Instant::now();
 
@@ -280,14 +283,24 @@ fn mining_loop(
         let drain = holder["detected_at"].as_f64().map(|d| crate::state::now_unix() - d).unwrap_or(0.0);
         log.event("priority_pause", merge(&[holder, json!({"drain_s":drain})]));
         state.gpu_paused.store(true, Ordering::SeqCst);
+        if manage_yield_power {
+            if let Err(error) = power_policy.set_limit(crate::power::YIELDED_LIMIT_W) {
+                log.event("error", json!({"error":format!("could not restore GPU power limit while yielding: {error:#}")}));
+            }
+        }
         while p.is_busy() && !stop() && !time_up(st) {
             check()?;
             std::thread::sleep(Duration::from_millis(100));
         }
         let paused = began.elapsed().as_secs_f64();
         st.paused += paused;
-        state.gpu_paused.store(false, Ordering::SeqCst);
-        log.event("priority_resume", json!({"paused_seconds":paused,"pauses":st.pauses}));
+        if !stop() && !time_up(st) {
+            if manage_yield_power {
+                power_policy.set_limit(crate::power::MINING_LIMIT_W).context("could not reapply mining power limit before resuming")?;
+            }
+            state.gpu_paused.store(false, Ordering::SeqCst);
+            log.event("priority_resume", json!({"paused_seconds":paused,"pauses":st.pauses}));
+        }
         Ok(())
     };
 
