@@ -51,6 +51,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
 
 cd "$ROOT"
 export CARGO_TARGET_DIR=/tmp/bpm-target
+export RUST_TEST_THREADS=1
 cargo test --release
 cargo build --release --bin bpm
 /tmp/bpm-target/release/bpm --version
