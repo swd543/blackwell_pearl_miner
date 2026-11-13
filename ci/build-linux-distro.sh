@@ -14,7 +14,7 @@ case "$DISTRO" in
       build-essential ca-certificates curl git procps python3 python3-pip python3-venv
     ;;
   fedora)
-    dnf -y install gcc gcc-c++ make ca-certificates curl git procps-ng python3 python3-pip
+    dnf -y install gcc gcc-c++ make ca-certificates curl git procps-ng python3 python3-pip which
     ;;
   arch)
     pacman -Syu --noconfirm --needed base-devel ca-certificates curl git procps-ng python python-pip
@@ -41,7 +41,9 @@ CUDA_HOME=/tmp/bpm-cuda-home
 mkdir -p "$CUDA_HOME/lib64/stubs" "$CUDA_HOME/targets/x86_64-linux/lib/stubs"
 ln -sfn "$TOOLKIT_ROOT/include" "$CUDA_HOME/include"
 ln -sfn /tmp/libcuda.so "$CUDA_HOME/lib64/stubs/libcuda.so"
+ln -sfn /tmp/libcuda.so "$CUDA_HOME/lib64/stubs/libcuda.so.1"
 export CUDA_HOME NVCC
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64/stubs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export CARGO_HOME=/tmp/cargo-home RUSTUP_HOME=/tmp/rustup-home
 export PATH="$CARGO_HOME/bin:$PATH"
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
