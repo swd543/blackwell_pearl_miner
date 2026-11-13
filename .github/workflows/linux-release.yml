@@ -1,0 +1,101 @@
+name: Linux release artifacts
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cuda-link-stub:
+    name: Fetch official CUDA link stub
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Extract NVIDIA CUDA 13.5 link-time driver stub
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm nvidia/cuda:13.5.0-devel-ubuntu22.04 \
+            sh -c 'test -r /usr/local/cuda/lib64/stubs/libcuda.so && cat /usr/local/cuda/lib64/stubs/libcuda.so' \
+            > "$RUNNER_TEMP/libcuda.so"
+          test -s "$RUNNER_TEMP/libcuda.so"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cuda-driver-link-stub
+          path: ${{ runner.temp }}/libcuda.so
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    name: Build ${{ matrix.distro }} x86_64
+    needs: cuda-link-stub
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: fedora
+            image: fedora:latest
+          - distro: arch
+            image: archlinux:latest
+          - distro: debian12
+            image: debian:12-slim
+          - distro: debian13
+            image: debian:13-slim
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/download-artifact@v4
+        with:
+          name: cuda-driver-link-stub
+          path: ${{ runner.temp }}/cuda-stub
+      - name: Build and test in ${{ matrix.image }}
+        env:
+          DISTRO: ${{ matrix.distro }}
+          IMAGE: ${{ matrix.image }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bpm-dist"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src" \
+            -v "$RUNNER_TEMP/cuda-stub/libcuda.so:/tmp/libcuda.so:ro" \
+            -v "$RUNNER_TEMP/bpm-dist:/out" \
+            -e DISTRO -e RELEASE_VERSION \
+            "$IMAGE" bash /src/ci/build-linux-distro.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bpm-${{ matrix.distro }}
+          path: ${{ runner.temp }}/bpm-dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish Linux binaries
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bpm-*
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub release with compiled artifacts only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

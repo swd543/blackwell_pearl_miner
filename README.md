@@ -52,6 +52,14 @@ The CUDA Toolkit is taken from `$CUDA_HOME` (or `$CUDA_PATH`, default `/usr/loca
 `$NVCC` overrides the compiler. The kernels are compiled into a library that is embedded in the
 binary, so `target/release/bpm` is the only file needed at run time.
 
+### CI release artifacts
+
+Pushing a `v*` tag runs `.github/workflows/linux-release.yml` and attaches compiled Linux x86_64
+tarballs for Fedora (rolling), Arch Linux (rolling), Debian 12, and Debian 13, plus SHA-256 files.
+The archives contain `bpm` and the project notices; the NVIDIA driver is supplied by the host. The
+workflow runs Rust tests and CLI smoke checks in each build environment. GPU self-tests require a
+Blackwell GPU and are not run on GitHub-hosted runners. No Windows artifacts are produced.
+
 ## Usage
 
 ```bash
