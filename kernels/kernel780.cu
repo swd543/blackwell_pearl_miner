@@ -8,7 +8,7 @@
 #include "gemm/pow_utils.hpp"
 
 namespace k780 {
-constexpr int P0 = 8, P1 = 10, P2 = 12, P3 = 14, P4 = 25, P5 = 27, P6 = 29, P7 = 31;
+constexpr int P0 = 5, P1 = 10, P2 = 12, P3 = 14, P4 = 25, P5 = 27, P6 = 29, P7 = 31, PL = 20;
 constexpr int BM = 160, BN = 256, WM = 80, WN = 64, MI = WM / 16, NJ = WN / 8, NT = 256;
 constexpr int FA = BM / 16, FB = BN / 16, FR = FA + FB, RQ = (FR + 7) / 8;
 constexpr int BASA = FA * 2048, BASB = FB * 2048, STG = FR * 512, TRACE = NT * 16 * 4;
@@ -30,6 +30,9 @@ struct Params {
   int cap;
 };
 
+__device__ Pair g_pairs[65536];
+__device__ uint32_t g_zero[16];
+
 __device__ __forceinline__ Pair ldpair(const Pair *p) {
   uint2 v;
   asm volatile("ld.global.nc.v2.u32 {%0,%1}, [%2];" : "=r"(v.x), "=r"(v.y) : "l"(p));
@@ -49,11 +52,15 @@ __device__ __forceinline__ void mma(int32_t *c, const uint32_t *a, const uint32_
 }
 
 // The kernel body is a separate force-inlined function (this shapes the generated code).
+// ptxas schedules this loop very sensitively: the tile-copy lambda, the pair-load lambda and the local copies of
+// threadIdx.x and p.pairs below are part of the measured layout (-2.6 % cycles against 1b51df4), keep them.
 __device__ __forceinline__ void body(const Params &p);
 __global__ __launch_bounds__(NT, 1) void kernel(const __grid_constant__ Params p) { body(p); }
 __device__ __forceinline__ void body(const Params &p) {
   extern __shared__ __align__(1024) uint8_t sm[];
-  const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, wr = warp / (BN / WN), wc = warp % (BN / WN);
+  const uint32_t tidv = threadIdx.x;
+  const int lane = tidv & 31, warp = tidv >> 5, wr = warp / (BN / WN), wc = warp % (BN / WN);
+  const Pair *pbase = p.pairs;
   const int tilesN = p.N / BN, tiles = (p.M / BM) * tilesN, S = p.K / 32;
   const unsigned bar = sa(sm + OFF_BAR), stg0 = sa(sm + OFF_STG);
   uint32_t *trace = (uint32_t *)(sm + OFF_TR);
@@ -74,6 +81,10 @@ __device__ __forceinline__ void body(const Params &p) {
     rbase[q] = f < FA ? sa(sm + OFF_BA) + f * 2048 : sa(sm + OFF_BB) + (f < FR ? f - FA : 0) * 2048;
     roff[q] = f * 512 + lane * 16;
   }
+  // Pairs of K step idx for this lane.
+  auto ldp = [&](int idx) -> Pair {
+    return ldpair(pbase + idx * 32 + lane);
+  };
   unsigned aoff[MI], boff[NJ / 2];
 #define RB(q) ((q) == 2 ? rbase[1] + 2048u : rbase[q])
 #define RO(q) ((q) == 2 ? roff[1] + 512u : roff[q])
@@ -83,15 +94,17 @@ __device__ __forceinline__ void body(const Params &p) {
 #pragma unroll
   for (int jp = 0; jp < NJ / 2; ++jp) boff[jp] = (FA + wc * (NJ / 2) + (jp < 2 ? wr * 2 + jp : (1 - wr) * 2 + jp - 2)) * 512 + lane * 16;
   unsigned phase = 0;
+  auto issue = [&](int t) {
+    const int row_ = (t / tilesN) * BM, col_ = (t % tilesN) * BN;
+    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+    asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(bar), "r"(BASA + BASB) : "memory");
+    asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" ::"r"(sa(sm + OFF_BA)), "l"(p.basA + size_t(row_ / 16) * 2048), "r"(BASA), "r"(bar) : "memory");
+    asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" ::"r"(sa(sm + OFF_BB)), "l"(p.basB + size_t(col_ / 16) * 2048), "r"(BASB), "r"(bar) : "memory");
+  };
   for (int tile = blockIdx.x; tile < tiles; tile += gridDim.x) {
-    const int bm = tile / tilesN, bn = tile % tilesN, row = bm * BM, col = bn * BN;
+    const int bm = tile / tilesN, bn = tile % tilesN, row = bm * BM;
     __syncthreads();
-    if (threadIdx.x == 0) {
-      asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
-      asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(bar), "r"(BASA + BASB) : "memory");
-      asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" ::"r"(sa(sm + OFF_BA)), "l"(p.basA + size_t(row / 16) * 2048), "r"(BASA), "r"(bar) : "memory");
-      asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" ::"r"(sa(sm + OFF_BB)), "l"(p.basB + size_t(col / 16) * 2048), "r"(BASB), "r"(bar) : "memory");
-    }
+    if (threadIdx.x == 0) issue(tile);
     asm volatile("{ .reg .pred q; L: mbarrier.try_wait.parity.shared::cta.b64 q, [%0], %1; @!q bra L; }" ::"r"(bar), "r"(phase) : "memory");
     phase ^= 1;
     const bool hasNonce = (row / 16 + FA - 1) >= lastfrag;
@@ -132,7 +145,7 @@ __device__ __forceinline__ void body(const Params &p) {
     uint32_t af[2][MI][4], bf[NJ - 1][2], b7[2][2];
     // Prologue: stage 0 stored; q0, q1 of stage 1 loaded.
     {
-      Pair pr = __ldg(p.pairs + lane);
+      Pair pr = __ldg(pbase + lane);
 #pragma unroll
       for (int q = 0; q < RQ; q += 2) {
         ldsm2(pr, q, 0);
@@ -141,10 +154,10 @@ __device__ __forceinline__ void body(const Params &p) {
         sts2(stg0, q + 1, 1, 0, true);
       }
     }
-    Pair prC = __ldg(p.pairs + 32 + lane);
+    Pair prC = __ldg(pbase + 32 + lane);
     ldsm2(prC, 0, 0);
     ldsm2(prC, 1, 1);
-    Pair prN = __ldg(p.pairs + 64 + lane), prNN = __ldg(p.pairs + ((S > 3 ? 96 : 0) + lane)), prL = prNN;
+    Pair prN = __ldg(pbase + 64 + lane), prNN = __ldg(pbase + ((S > 3 ? 96 : 0) + lane)), prL = prNN;
     asm volatile("bar.sync 0;" ::: "memory");
 #pragma unroll
     for (int k = 0; k < MI; ++k) LDS4(stg0 + aoff[k], af[0][k][0], af[0][k][1], af[0][k][2], af[0][k][3]);
@@ -168,7 +181,7 @@ __device__ __forceinline__ void body(const Params &p) {
           if (pp == P4) { sts2(nxt, 2, 0, s + 1, corr); bf[2][0] = ov[0]; bf[2][1] = ov[2]; bf[3][0] = ov[1]; bf[3][1] = ov[3]; }
           if (pp == P5) { sts2(nxt, 3, 1, s + 1, corr); af[O][MI - 1][0] = ov[0]; af[O][MI - 1][1] = ov[1]; af[O][MI - 1][2] = ov[2]; af[O][MI - 1][3] = ov[3]; }
         }
-        if (pp == 0) prL = ldpair(p.pairs + ((s + 4) & (S - 1)) * 32 + lane);
+        if (pp == PL) prL = ldp((s + 4) & (S - 1));
         if (doIssue) {
           if (pp == P6) ldsm2(prN, 0, 0);
           if (pp == P7) ldsm2(prN, 1, 1);
@@ -226,15 +239,16 @@ __device__ __forceinline__ void body(const Params &p) {
     };
     const unsigned b0 = stg0, b1 = stg0 + STG;
     // Four steps per loop iteration. mode 0: first group, 1: steady state, 2: last group.
-    auto grp = [&]<bool FIRST, int... k>(std::integer_sequence<int, k...>, const int s0, const int mode) {
-      (step.template operator()<(k & 1), ((k & 3) == 3) ? 1 : 0, ((k & 3) == 0 && !(FIRST && k == 0)) ? 1 : 0>(
+    // MID: steady-state group; its last step is never the last step of the tile, so it carries no final-fold code.
+    auto grp = [&]<bool FIRST, bool MID, int... k>(std::integer_sequence<int, k...>, const int s0, const int mode) {
+      (step.template operator()<(k & 1), ((k & 3) == 3 && !MID) ? 1 : 0, ((k & 3) == 0 && !(FIRST && k == 0)) ? 1 : 0>(
            s0 + k, (k & 1) ? b0 : b1, mode != 2 || s0 + k < S - 1, mode != 2 || s0 + k < S - 2, mode != 2 || s0 + k < S - 1, mode == 0 && k == 0),
        ...);
     };
-    grp.template operator()<true>(std::make_integer_sequence<int, 4>{}, 0, 0);
+    grp.template operator()<true, false>(std::make_integer_sequence<int, 4>{}, 0, 0);
 #pragma unroll 1
-    for (int s = 4; s < S - 4; s += 4) grp.template operator()<false>(std::make_integer_sequence<int, 4>{}, s, 1);
-    grp.template operator()<false>(std::make_integer_sequence<int, 4>{}, S - 4, 2);
+    for (int s = 4; s < S - 4; s += 4) grp.template operator()<false, true>(std::make_integer_sequence<int, 4>{}, s, 1);
+    grp.template operator()<false, false>(std::make_integer_sequence<int, 4>{}, S - 4, 2);
     {
       auto msg = cute::make_tensor<uint32_t>(cute::Int<16>{});
       auto digest = cute::make_tensor<uint32_t>(cute::Int<8>{});
@@ -257,9 +271,6 @@ __device__ __forceinline__ void body(const Params &p) {
     }
   }
 }
-
-__device__ Pair g_pairs[65536];
-__device__ uint32_t g_zero[16];
 
 __global__ void build_pairs(const uint32_t *ia, const uint32_t *ib, Pair *out, int k) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
