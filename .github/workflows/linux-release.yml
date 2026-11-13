@@ -20,8 +20,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm nvidia/cuda:13.5.0-devel-ubuntu22.04 \
-            sh -c 'test -r /usr/local/cuda/lib64/stubs/libcuda.so && cat /usr/local/cuda/lib64/stubs/libcuda.so' \
+          docker run --rm --entrypoint /bin/sh nvidia/cuda:13.5.0-devel-ubuntu22.04 \
+            -c 'test -r /usr/local/cuda/lib64/stubs/libcuda.so && cat /usr/local/cuda/lib64/stubs/libcuda.so' \
             > "$RUNNER_TEMP/libcuda.so"
           test -s "$RUNNER_TEMP/libcuda.so"
       - uses: actions/upload-artifact@v4

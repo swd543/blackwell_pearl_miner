@@ -31,8 +31,7 @@ python3 -m venv "$VENV"
   nvidia-cuda-runtime==13.5.37 \
   nvidia-cuda-crt==13.5.37 \
   nvidia-cuda-cccl==13.3.5.0.6
-SITE=$($VENV/bin/python -c 'import site; print(site.getsitepackages()[0])')
-NVCC=$(find "$SITE/nvidia" -type f -path '*/bin/nvcc' -print -quit)
+NVCC=$(find "$VENV" -type f -name nvcc -print -quit)
 [[ -x "$NVCC" ]] || { echo 'CUDA 13.5 nvcc was not installed' >&2; exit 1; }
 TOOLKIT_ROOT=$(dirname "$(dirname "$NVCC")")
 
