@@ -16,7 +16,7 @@ pub struct Kernels {
     pub merkle_init: unsafe extern "C" fn(C, P, c_int, P) -> c_int,
     pub merkle_root: unsafe extern "C" fn(C, C, C, P, c_int, P) -> c_int,
     pub advance_nonce: unsafe extern "C" fn(P, P, c_int, P) -> c_int,
-    pub build_indices: unsafe extern "C" fn(C, P, P, c_int, P) -> c_int,
+    pub build_indices: unsafe extern "C" fn(C, P, c_int, P) -> c_int,
     pub pack_basis: unsafe extern "C" fn(C, P, P) -> c_int,
     pub prepare_packed: unsafe extern "C" fn(C, C, C, P, P, c_int, c_int, P) -> c_int,
     pub commit: unsafe extern "C" fn(C, C, C, P, P, c_int, c_int, c_int, P) -> c_int,

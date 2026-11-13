@@ -130,6 +130,13 @@ types.
 * **Kernel 448** works on dense prepared operands with K = 4096 and needs about 0.8 GiB. If the
   pool does not negotiate gzip proofs, the miner switches to this profile automatically.
 
+The full keyed Merkle tree is allocated on the GPU only during job setup, then downloaded
+for CPU proofs and freed. Rounds retain just the nonce leaf's sibling path (576–672 bytes
+for kernel 780). Compared with retaining the full tree and unused unpacked index arrays,
+the GPU regression measurement shows about 32 MiB less persistent device memory at
+K = 16384, or 128 MiB at K = 65536 (CUDA memory reporting is granular). CPU proof-heap storage is unchanged and the full GPU tree is still needed at
+setup peak; driver/context memory is additional.
+
 ### Sharing the GPU (`--priority`)
 
 `--priority PATH` (repeatable) names a script or binary that has precedence on the GPU, for
@@ -154,6 +161,18 @@ hold GPU memory (an idle inference server, a desktop) do not pause mining. The t
 cargo test --release
 ./target/release/bpm --self-test
 ```
+
+An additional ignored GPU regression test covers all five profiles, both certificate
+versions, ring-slot reuse and job replacement:
+
+```bash
+cargo test --release gpu_round_regression -- --ignored --nocapture --test-threads=1
+```
+
+Run GPU tests only on a trusted idle Blackwell GPU with coordinated power/thermal controls
+and other GPU workloads parked. The regression test emits `GPU_FIXTURE` records containing
+sorted hit IDs, roots and proof hashes for exact before/after comparison, plus `GPU_MEMORY`
+measurements. It checks the 88°C cutoff but does not manage power limits or workload parking.
 
 ## License
 

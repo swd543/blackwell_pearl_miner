@@ -47,15 +47,16 @@ __global__ void parents(const uint32_t *key, uint32_t *tree, int first, int coun
   for (int i = 0; i < 8; ++i) tree[node * 8 + i] = cv(i);
 }
 // Root of the matrix whose only non-constant chunk is the nonce leaf, read from `a`.
-__global__ void update(const uint32_t *a, const uint32_t *key, const uint32_t *tree, uint32_t *root, int nleaves, int nonce_leaf) {
+// Sibling CVs are packed leaf-to-root; the full tree exists only during job setup.
+__global__ void update(const uint32_t *a, const uint32_t *key, const uint32_t *siblings, uint32_t *root, int nleaves, int nonce_leaf) {
   if (threadIdx.x) return;
   auto cv = constant_chunk(key, nonce_leaf, a + size_t(nonce_leaf) * 256);
   auto msg = cute::make_tensor<uint32_t>(cute::Shape<cute::_16>{});
-  for (int node = nleaves + nonce_leaf; node > 1; node >>= 1) {
+  for (int node = nleaves + nonce_leaf, level = 0; node > 1; node >>= 1, ++level) {
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
       msg((node & 1) ? i + 8 : i) = cv(i);
-      msg((node & 1) ? i : i + 8) = tree[(node ^ 1) * 8 + i];
+      msg((node & 1) ? i : i + 8) = siblings[level * 8 + i];
     }
     cv = key_cv(key);
     blake3::compress_msg_block_u32(msg, cv, node == 2 || node == 3 ? blake3::COMPRESS_PARAMS_ROOT : blake3::COMPRESS_PARAMS_INNER_NODE);
@@ -81,7 +82,7 @@ __global__ void pack_basis_frag(const int8_t *input, uint8_t *output) {
   }
 }
 // Sparse +1/-1 rows -> component indices (plus, minus) and prescaled packed offsets.
-__global__ void build_indices(const int8_t *permutation, int32_t *indices, uint32_t *packed, int k) {
+__global__ void build_indices(const int8_t *permutation, uint32_t *packed, int k) {
   int col = blockIdx.x * blockDim.x + threadIdx.x;
   if (col >= k) return;
   int plus = 0, minus = 0;
@@ -90,8 +91,6 @@ __global__ void build_indices(const int8_t *permutation, int32_t *indices, uint3
     if (v == 1) plus = j;
     if (v == -1) minus = j;
   }
-  indices[col] = plus;
-  indices[k + col] = minus;
   packed[col] = uint32_t(plus * 16) | (uint32_t(minus * 16) << 16);
 }
 
@@ -151,10 +150,10 @@ extern "C" int pm_merkle_init(const void *key, void *tree, int k, void *stream) 
   for (int count = nleaves / 2; count >= 2; count >>= 1) parents<<<(count + 127) / 128, 128, 0, s>>>((const uint32_t *)key, (uint32_t *)tree, count, count);
   return cudaGetLastError();
 }
-extern "C" int pm_merkle_root(const void *a, const void *key, const void *tree, void *root, int k, void *stream) {
+extern "C" int pm_merkle_root(const void *a, const void *key, const void *siblings, void *root, int k, void *stream) {
   if (k < 2048 || k > 65536 || (k & (k - 1))) return cudaErrorInvalidValue;
   int nleaves = 32 * k, nonce_leaf = (M - 1) * k / 1024;
-  update<<<1, 32, 0, (cudaStream_t)stream>>>((const uint32_t *)a, (const uint32_t *)key, (const uint32_t *)tree, (uint32_t *)root, nleaves, nonce_leaf);
+  update<<<1, 32, 0, (cudaStream_t)stream>>>((const uint32_t *)a, (const uint32_t *)key, (const uint32_t *)siblings, (uint32_t *)root, nleaves, nonce_leaf);
   return cudaGetLastError();
 }
 extern "C" int pm_advance_nonce(void *a, void *counter, int k, void *stream) {
@@ -162,9 +161,9 @@ extern "C" int pm_advance_nonce(void *a, void *counter, int k, void *stream) {
   advance_nonce<<<1, 64, 0, (cudaStream_t)stream>>>((int8_t *)a, (unsigned long long *)counter, k);
   return cudaGetLastError();
 }
-extern "C" int pm_build_indices(const void *in, void *indices, void *packed, int k, void *stream) {
+extern "C" int pm_build_indices(const void *in, void *packed, int k, void *stream) {
   if (k < 2048 || k > 65536 || k % 128) return cudaErrorInvalidValue;
-  build_indices<<<(k + 127) / 128, 128, 0, (cudaStream_t)stream>>>((const int8_t *)in, (int32_t *)indices, (uint32_t *)packed, k);
+  build_indices<<<(k + 127) / 128, 128, 0, (cudaStream_t)stream>>>((const int8_t *)in, (uint32_t *)packed, k);
   return cudaGetLastError();
 }
 extern "C" int pm_pack_basis(const void *in, void *out, void *stream) {

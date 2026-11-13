@@ -12,7 +12,7 @@ use std::ffi::c_void;
 /// signal except its last row's 64-byte nonce and B is constant, so one K-byte row of each
 /// suffices (the kernels address row m-1 through a shifted base pointer).
 enum Operands {
-    Lean { a_row: DevBuf, b_row: DevBuf, ia: DevBuf, ib: DevBuf, packed_a: DevBuf, packed_b: DevBuf, packed_ia: DevBuf, packed_ib: DevBuf },
+    Lean { a_row: DevBuf, b_row: DevBuf, packed_a: DevBuf, packed_b: DevBuf, packed_ia: DevBuf, packed_ib: DevBuf },
     Dense { a: DevBuf, b: DevBuf, an: DevBuf, bn: DevBuf, pairs_a: DevBuf, pairs_b: DevBuf },
 }
 
@@ -46,7 +46,7 @@ pub struct Engine {
     key_a: DevBuf,
     key_b: DevBuf,
     nonce: DevBuf,
-    tree: DevBuf,
+    nonce_siblings: DevBuf,
     eal: DevBuf,
     ear: DevBuf,
     ebl: DevBuf,
@@ -69,8 +69,6 @@ impl Engine {
             Kernel::K780 => Operands::Lean {
                     a_row: DevBuf::filled(k, 64)?,
                     b_row: DevBuf::filled(k, 64)?,
-                    ia: DevBuf::new(2 * k * 4)?,
-                    ib: DevBuf::new(2 * k * 4)?,
                     packed_a: DevBuf::new(M * RANK)?,
                     packed_b: DevBuf::new(N * RANK)?,
                     packed_ia: DevBuf::new(k * 4)?,
@@ -102,7 +100,7 @@ impl Engine {
             key_a: DevBuf::new(32)?,
             key_b: DevBuf::new(32)?,
             nonce: DevBuf::new(8)?,
-            tree: DevBuf::new(crate::proof::ProofCache::heap_bytes(&profile))?,
+            nonce_siblings: DevBuf::new(crate::proof::ProofCache::nonce_sibling_bytes(&profile))?,
             eal: DevBuf::new(M * RANK)?,
             ear: DevBuf::new(k * RANK)?,
             ebl: DevBuf::new(k * RANK)?,
@@ -142,20 +140,20 @@ impl Engine {
         let (s, k, sp) = (self.s(), self.profile.k as i32, self.support);
         unsafe {
             rc((sp.advance_nonce)(self.a_ptr(), self.nonce.p(), k, s), "advance_nonce")?;
-            rc((sp.merkle_root)(self.a_ptr(), self.key.p(), self.tree.p(), self.root_a.p(), k, s), "merkle_root(A)")?;
+            rc((sp.merkle_root)(self.a_ptr(), self.key.p(), self.nonce_siblings.p(), self.root_a.p(), k, s), "merkle_root(A)")?;
             if with_b {
                 // Constant B: its root is the cached constant tree with a constant nonce leaf.
-                rc((sp.merkle_root)(self.b_ptr(), self.key.p(), self.tree.p(), self.root_b.p(), k, s), "merkle_root(B)")?;
+                rc((sp.merkle_root)(self.b_ptr(), self.key.p(), self.nonce_siblings.p(), self.root_b.p(), k, s), "merkle_root(B)")?;
             }
             rc((sp.commit)(self.root_a.p(), self.root_b.p(), self.key.p(), self.key_a.p(), self.key_b.p(), self.cert, M as i32, N as i32, s), "commit")?;
             let which = if with_b { 3 } else { 1 };
             rc((sp.noise)(self.eal.p(), self.ear.p(), self.ebl.p(), self.ebr.p(), self.key_a.p(), self.key_b.p(), M as i32, N as i32, k, which, s), "noise")?;
             match &self.ops {
-                Operands::Lean { ia, ib, packed_a, packed_b, packed_ia, packed_ib, .. } => {
-                    rc((sp.build_indices)(self.ear.p(), ia.p(), packed_ia.p(), k, s), "build_indices(A)")?;
+                Operands::Lean { packed_a, packed_b, packed_ia, packed_ib, .. } => {
+                    rc((sp.build_indices)(self.ear.p(), packed_ia.p(), k, s), "build_indices(A)")?;
                     rc((sp.pack_basis)(self.eal.p(), packed_a.p(), s), "pack_basis(A)")?;
                     if with_b {
-                        rc((sp.build_indices)(self.ebl.p(), ib.p(), packed_ib.p(), k, s), "build_indices(B)")?;
+                        rc((sp.build_indices)(self.ebl.p(), packed_ib.p(), k, s), "build_indices(B)")?;
                         rc((sp.pack_basis)(self.ebr.p(), packed_b.p(), s), "pack_basis(B)")?;
                     }
                 }
@@ -207,7 +205,18 @@ impl Engine {
         self.key.upload(&job.key)?;
         self.target.upload(&job.bound)?;
         self.nonce.upload(&start_nonce.to_le_bytes())?;
-        unsafe { rc((self.support.merkle_init)(self.key.p(), self.tree.p(), self.profile.k as i32, self.s()), "merkle_init")? };
+        // Only setup needs the full tree. Download it for CPU proofs, retain the
+        // nonce leaf's sibling chain on GPU, and free the tree before graph capture.
+        // Captured graphs reference only the stable nonce_siblings allocation.
+        let heap = {
+            let tree = DevBuf::new(crate::proof::ProofCache::heap_bytes(&self.profile))?;
+            unsafe { rc((self.support.merkle_init)(self.key.p(), tree.p(), self.profile.k as i32, self.s()), "merkle_init")? };
+            self.stream.sync()?;
+            let mut heap = vec![0u8; tree.bytes];
+            tree.download(&mut heap)?;
+            self.nonce_siblings.upload(&crate::proof::ProofCache::nonce_siblings(&self.profile, &heap)?)?;
+            heap
+        };
         self.prepare(true)?;
         self.stream.sync()?;
         for i in 0..self.slots.len() {
@@ -217,8 +226,6 @@ impl Engine {
             captured?;
             self.slots[i].graph = Some(graph?);
         }
-        let mut heap = vec![0u8; self.tree.bytes];
-        self.tree.download(&mut heap)?;
         let mut root_b = [0u8; 32];
         self.root_b.download(&mut root_b)?;
         Ok((heap, root_b))
@@ -267,5 +274,73 @@ impl Engine {
 impl Drop for Engine {
     fn drop(&mut self) {
         let _ = self.stream.sync();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proof::ProofCache;
+    use crate::protocol::hex;
+    use serde_json::json;
+
+    /// Run explicitly on a trusted Blackwell GPU, never on hosted CI. Sorted hit IDs,
+    /// roots and serialized proofs form an exact before/after regression fixture.
+    #[test]
+    #[ignore = "requires an idle Blackwell GPU and coordinated thermal/power controls"]
+    fn gpu_round_regression() -> Result<()> {
+        let device = crate::cuda::Device::open(0)?;
+        let info = device.info()?;
+        ensure!(info.capability == (12, 0), "Blackwell 12.0 required");
+        let nvml = crate::nvml::Nvml::open(&info.pci_bus_id)?;
+        let safe = || -> Result<()> {
+            ensure!(nvml.temperature_c()? < 88, "GPU thermal cutoff reached");
+            Ok(())
+        };
+        let mut fixtures = Vec::new();
+        for (kernel, k) in [(Kernel::K780, 8192), (Kernel::K780, 16384),
+                            (Kernel::K780, 32768), (Kernel::K780, 65536), (Kernel::K448, 4096)] {
+            safe()?;
+            let profile = Profile::new(kernel, k)?;
+            let (free_before, _) = crate::cuda::memory_info()?;
+            let mut engine = Engine::new(profile, 4, 4096)?;
+            // A second job exercises recapture and sibling-path replacement on one engine.
+            for (cert, nonce) in [(3, 0), (2, 0x123456789abcdef0u64)] {
+                safe()?;
+                let mut pool = crate::test_job(profile)?.pool;
+                pool.cert_version = cert;
+                pool.header[36] ^= cert as u8;
+                let job = MiningJob::new(pool, profile)?;
+                let (heap, root_b) = engine.set_job(&job, nonce)?;
+                let heap_hash = blake3::hash(&heap[64..]).to_hex().to_string();
+                let cache = ProofCache::new(profile, heap, job.key, root_b)?;
+                let (free_after, _) = crate::cuda::memory_info()?;
+                println!("GPU_MEMORY={}", json!({"variant":profile.variant(), "k":k,
+                    "cert":cert, "used_bytes":free_before.saturating_sub(free_after)}));
+                for slot in 0..engine.depth() { engine.launch(slot)?; }
+                for round in 0..8 {
+                    safe()?;
+                    let slot = round % engine.depth();
+                    let mut snap = engine.collect(slot)?;
+                    ensure!(snap.overflow == 0, "regression fixture overflowed");
+                    snap.groups.sort_unstable();
+                    let mut proof_hashes = Vec::new();
+                    for &group in snap.groups.iter().take(3) {
+                        let bytes = crate::proof::verify(&job, &cache.proof(group, &snap.signal, &snap.root_a)?)?;
+                        proof_hashes.push(blake3::hash(&bytes).to_hex().to_string());
+                    }
+                    // Check the nonce root even when a particular round has no hits.
+                    cache.proof(0, &snap.signal, &snap.root_a)?;
+                    fixtures.push(json!({"variant":profile.variant(), "k":k, "cert":cert,
+                        "round":round, "sequence":snap.sequence, "signal":hex(&snap.signal),
+                        "root_a":hex(&snap.root_a), "root_b":hex(&root_b), "heap":heap_hash,
+                        "groups":snap.groups, "proofs":proof_hashes}));
+                    if round < 4 { engine.launch(slot)?; }
+                }
+            }
+            safe()?;
+        }
+        println!("GPU_FIXTURE={}", serde_json::to_string(&fixtures)?);
+        Ok(())
     }
 }

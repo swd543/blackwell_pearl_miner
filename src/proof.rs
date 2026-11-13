@@ -28,6 +28,25 @@ impl ProofCache {
         2 * (M * profile.k / CHUNK).next_power_of_two() * 32
     }
 
+    /// One sibling CV per level, in the order consumed by the GPU root update.
+    pub fn nonce_sibling_bytes(profile: &Profile) -> usize {
+        let capacity = (M * profile.k / CHUNK).next_power_of_two();
+        capacity.trailing_zeros() as usize * 32
+    }
+
+    pub fn nonce_siblings(profile: &Profile, heap: &[u8]) -> Result<Vec<u8>> {
+        ensure!(heap.len() == Self::heap_bytes(profile), "wrong Merkle heap length");
+        let capacity = (M * profile.k / CHUNK).next_power_of_two();
+        let mut node = capacity + (M - 1) * profile.k / CHUNK;
+        let mut siblings = Vec::with_capacity(Self::nonce_sibling_bytes(profile));
+        while node > 1 {
+            let start = (node ^ 1) * 32;
+            siblings.extend_from_slice(&heap[start..start + 32]);
+            node >>= 1;
+        }
+        Ok(siblings)
+    }
+
     pub fn new(profile: Profile, heap: Vec<u8>, key: [u8; 32], gpu_root_b: [u8; 32]) -> Result<Self> {
         let nleaves = M * profile.k / CHUNK;
         let capacity = nleaves.next_power_of_two();
@@ -127,4 +146,37 @@ pub fn verify(job: &MiningJob, proof: &PlainProof) -> Result<Vec<u8>> {
     )
     .context("official verifier rejected GPU share")?;
     Ok(bincode::serialize(proof)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::Kernel;
+
+    #[test]
+    fn compact_siblings_follow_the_nonce_path_for_every_profile() {
+        for (kernel, k) in [(Kernel::K780, 8192), (Kernel::K780, 16384),
+                            (Kernel::K780, 32768), (Kernel::K780, 65536), (Kernel::K448, 4096)] {
+            let profile = Profile::new(kernel, k).unwrap();
+            let capacity = M * k / CHUNK;
+            let mut heap = vec![0u8; ProofCache::heap_bytes(&profile)];
+            // Every sibling is distinct, including all eight words of each CV.
+            let mut node = capacity + (M - 1) * k / CHUNK;
+            let mut expected = Vec::new();
+            while node > 1 {
+                let sibling = node ^ 1;
+                for word in 0..8 {
+                    let value = ((sibling as u32) * 8 + word as u32).to_le_bytes();
+                    heap[sibling * 32 + word * 4..sibling * 32 + word * 4 + 4].copy_from_slice(&value);
+                    expected.extend_from_slice(&value);
+                }
+                node >>= 1;
+            }
+            let compact = ProofCache::nonce_siblings(&profile, &heap).unwrap();
+            assert_eq!(compact, expected);
+            assert_eq!(compact.len(), ProofCache::nonce_sibling_bytes(&profile));
+            assert!(compact.len() <= 21 * 32);
+            assert!(ProofCache::nonce_siblings(&profile, &heap[..heap.len() - 1]).is_err());
+        }
+    }
 }
